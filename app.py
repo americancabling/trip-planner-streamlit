@@ -110,7 +110,7 @@ def get_users_from_secrets():
     """
     Load USERS mapping from Streamlit secrets.
 
-    Expected format in .streamlit/secrets.toml (or Streamlit Cloud secrets):
+    Expected format in secrets:
 
     [USERS]
     tim = "some_password"
@@ -219,7 +219,7 @@ def get_openai_client():
     ChatGPT calls should be disabled.
 
     It will try, in order:
-    1) st.secrets["OPENAI_API_KEY"] (if secrets exist)
+    1) st.secrets["OPENAI_API_KEY"]
     2) environment variable OPENAI_API_KEY
     """
     if not OPENAI_AVAILABLE:
@@ -232,10 +232,9 @@ def get_openai_client():
 
     # Try Streamlit secrets
     try:
-        if "OPENAI_API_KEY" in st.secrets:
-            api_key = st.secrets["OPENAI_API_KEY"]
+        api_key = st.secrets["OPENAI_API_KEY"]
     except Exception:
-        pass
+        api_key = None
 
     # Fallback to environment variable
     if not api_key:
@@ -353,6 +352,12 @@ def main():
     # ----------------- SIDEBAR -----------------
     st.sidebar.title("Trips")
     st.sidebar.markdown(f"**Logged in as:** {current_user}")
+
+    # DEBUG: show which secret keys exist (NOT their values)
+    try:
+        st.sidebar.caption(f"Secrets keys: {list(st.secrets.keys())}")
+    except Exception:
+        st.sidebar.caption("Secrets not available.")
 
     selected_name = st.sidebar.selectbox(
         "Load a saved trip",
