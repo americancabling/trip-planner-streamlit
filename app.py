@@ -210,7 +210,7 @@ def get_openai_client():
 
     It will try, in order:
     1) st.secrets["OPENAI_API_KEY"] (top-level)
-    2) st.secrets["USERS"]["OPENAI_API_KEY"] (nested, as in current config)
+    2) st.secrets["USERS"]["OPENAI_API_KEY"] (nested, as in your cloud config)
     3) environment variable OPENAI_API_KEY
     """
     if not OPENAI_AVAILABLE:
@@ -221,18 +221,24 @@ def get_openai_client():
 
     api_key = None
 
-    # 1) Try top-level
+    # 1) Try top-level OPENAI_API_KEY
     try:
         api_key = st.secrets["OPENAI_API_KEY"]
     except Exception:
         api_key = None
 
-    # 2) Try nested inside [USERS] (your current cloud secrets)
+    # 2) Try nested under [USERS]
     if not api_key:
         try:
-            users_section = st.secrets.get("USERS", {})
-            if isinstance(users_section, dict):
-                api_key = users_section.get("OPENAI_API_KEY")
+            users_section = st.secrets["USERS"]
+            # users_section behaves like a dict-like object
+            try:
+                api_key = users_section["OPENAI_API_KEY"]
+            except Exception:
+                try:
+                    api_key = users_section.get("OPENAI_API_KEY", None)
+                except Exception:
+                    api_key = None
         except Exception:
             api_key = None
 
@@ -366,21 +372,18 @@ def main():
     st.sidebar.title("Trips")
     st.sidebar.markdown(f"**Logged in as:** {current_user}")
 
-    # Show which secrets keys exist (debug, but useful)
+    # Show which secrets keys exist (debug)
     try:
         keys = list(st.secrets.keys())
         st.sidebar.caption(f"Secrets keys: {keys}")
-        # Extra debug: check nested key too
-        has_top_level_openai = "OPENAI_API_KEY" in keys
-        has_nested_openai = False
+        # Also show keys inside USERS, if present
         if "USERS" in keys:
             users_section = st.secrets["USERS"]
-            if isinstance(users_section, dict):
-                has_nested_openai = "OPENAI_API_KEY" in users_section
-        st.sidebar.caption(
-            f"Top-level OPENAI_API_KEY: {has_top_level_openai}, "
-            f"USERS.OPENAI_API_KEY: {has_nested_openai}"
-        )
+            try:
+                user_keys = list(users_section.keys())
+            except Exception:
+                user_keys = str(users_section)
+            st.sidebar.caption(f"USERS keys: {user_keys}")
     except Exception:
         st.sidebar.caption("Secrets not available.")
 
