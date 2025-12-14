@@ -209,8 +209,9 @@ def get_openai_client():
     ChatGPT calls should be disabled.
 
     It will try, in order:
-    1) st.secrets["OPENAI_API_KEY"]
-    2) environment variable OPENAI_API_KEY
+    1) st.secrets["OPENAI_API_KEY"] (top-level)
+    2) st.secrets["USERS"]["OPENAI_API_KEY"] (nested, as in current config)
+    3) environment variable OPENAI_API_KEY
     """
     if not OPENAI_AVAILABLE:
         return (
@@ -220,21 +221,30 @@ def get_openai_client():
 
     api_key = None
 
-    # Try Streamlit secrets
+    # 1) Try top-level
     try:
         api_key = st.secrets["OPENAI_API_KEY"]
     except Exception:
         api_key = None
 
-    # Fallback to environment variable
+    # 2) Try nested inside [USERS] (your current cloud secrets)
+    if not api_key:
+        try:
+            users_section = st.secrets.get("USERS", {})
+            if isinstance(users_section, dict):
+                api_key = users_section.get("OPENAI_API_KEY")
+        except Exception:
+            api_key = None
+
+    # 3) Fallback to environment variable
     if not api_key:
         api_key = os.environ.get("OPENAI_API_KEY")
 
     if not api_key:
         return (
             None,
-            "OpenAI API key not set. Set OPENAI_API_KEY in .streamlit/secrets.toml "
-            "or as an environment variable.",
+            "OpenAI API key not set. Set OPENAI_API_KEY in .streamlit/secrets.toml, "
+            "under [USERS] as USERS.OPENAI_API_KEY, or as an environment variable.",
         )
 
     try:
@@ -358,7 +368,19 @@ def main():
 
     # Show which secrets keys exist (debug, but useful)
     try:
-        st.sidebar.caption(f"Secrets keys: {list(st.secrets.keys())}")
+        keys = list(st.secrets.keys())
+        st.sidebar.caption(f"Secrets keys: {keys}")
+        # Extra debug: check nested key too
+        has_top_level_openai = "OPENAI_API_KEY" in keys
+        has_nested_openai = False
+        if "USERS" in keys:
+            users_section = st.secrets["USERS"]
+            if isinstance(users_section, dict):
+                has_nested_openai = "OPENAI_API_KEY" in users_section
+        st.sidebar.caption(
+            f"Top-level OPENAI_API_KEY: {has_top_level_openai}, "
+            f"USERS.OPENAI_API_KEY: {has_nested_openai}"
+        )
     except Exception:
         st.sidebar.caption("Secrets not available.")
 
@@ -661,9 +683,9 @@ def main():
             "balanced",
         ],
         format_func=lambda x: {
-                "minimize_driving_time": "Mainly minimize driving time",
-                "maximize_scenic_or_interesting_stops": "Maximize scenic or interesting stops",
-                "balanced": "Balance both",
+            "minimize_driving_time": "Mainly minimize driving time",
+            "maximize_scenic_or_interesting_stops": "Maximize scenic or interesting stops",
+            "balanced": "Balance both",
         }[x],
         index=[
             "minimize_driving_time",
