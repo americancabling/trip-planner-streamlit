@@ -89,15 +89,9 @@ def new_empty_trip() -> dict:
         "lodging_style": "upscale",
         "travelers_description": "2 adults, no kids",
         "mobility_or_special_needs": "",
-        "base_route_constraints": {
-            "avoid_tolls": False,
-            "avoid_ferries": False,
-            "avoid_major_cities": False,
-        },
         "auto_discovery_categories": [],
         "default_max_detour_hours": 2.0,
         "points_of_interest": [],
-        "poi_selection_for_refined_plan": [],
         "planning_focus": "balanced",
         "output_detail_level": "daily_outline",
     }
@@ -168,7 +162,7 @@ def build_yaml_from_trip(trip: dict) -> str:
     The user never sees this YAML; it’s strictly for the model.
     """
     yaml_obj = {
-        "version": "1.0",
+        "version": "1.1",
         "agent_name": "roadtrip_trip_planner",
         "description": "User-provided configuration for a road-trip planner AI.",
         "trip_config": {
@@ -192,15 +186,11 @@ def build_yaml_from_trip(trip: dict) -> str:
             "lodging_style": trip.get("lodging_style", "upscale"),
             "travelers_description": trip.get("travelers_description"),
             "mobility_or_special_needs": trip.get("mobility_or_special_needs"),
-            "base_route_constraints": trip.get("base_route_constraints", {}),
             "auto_discovery_categories": trip.get(
                 "auto_discovery_categories", []
             ),
             "default_max_detour_hours": trip.get("default_max_detour_hours", 2),
             "points_of_interest": trip.get("points_of_interest", []),
-            "poi_selection_for_refined_plan": trip.get(
-                "poi_selection_for_refined_plan", []
-            ),
             "planning_focus": trip.get("planning_focus", "balanced"),
             "output_detail_level": trip.get(
                 "output_detail_level", "daily_outline"
@@ -273,15 +263,21 @@ def ask_chatgpt_for_itinerary(yaml_text: str) -> str:
         "  - Maximum daily driving hours\n"
         "  - Total days available\n"
         "  - Trip direction (one-way vs round-trip)\n"
-        "  - Route constraints (avoid tolls/ferries/major cities if requested)\n"
         "  - Points of interest and their priorities\n"
+        "- Every point_of_interest whose priority is 'must_do' is MANDATORY:\n"
+        "  - You MUST schedule a clear stop or activity that satisfies each must_do POI.\n"
+        "  - Explicitly mention it in the itinerary using language that matches its label/details.\n"
+        "  - If it is truly impossible to include due to time or route constraints,\n"
+        "    explain briefly at the end why it could not be scheduled.\n"
         "- For major stops, include:\n"
         "  - Specific example hotel or lodging names that fit the lodging style\n"
         "  - Specific restaurant names, including at least one nice or special option per key stop\n"
-        "  - Specific attractions or activities (museums, tours, viewpoints, hikes, historic sites, etc.)\n"
-        "- When suggesting specific places (hotels, restaurants, activities):\n"
+        "  - Specific attractions or activities (museums, tours, viewpoints, hikes, historic sites, shopping, etc.)\n"
+        "- When suggesting specific places (hotels, restaurants, activities, shopping):\n"
         "  - Prefer real, known places from current data.\n"
         "  - Mention the city/neighborhood and a short reason it fits.\n"
+        "  - For shopping-related POIs (category like 'shopping' or details mentioning malls or department stores),\n"
+        "    include at least one named shopping mall or retail district and clearly mark that time as shopping.\n"
         "  - You may mention key platforms or official websites for bookings,\n"
         "    but do not fabricate highly specific URLs.\n"
         "- At the end, include a brief reminder to double-check:\n"
@@ -297,6 +293,7 @@ def ask_chatgpt_for_itinerary(yaml_text: str) -> str:
         "  - Main stops or activities\n"
         "  - At least one suggested place to stay (where relevant)\n"
         "  - At least one suggested restaurant (where relevant)\n"
+        "  - Any must_do POIs scheduled that day (call them out clearly).\n"
     )
 
     try:
@@ -344,50 +341,125 @@ def main():
     # ----------------- AUTH -----------------
     current_user = authenticate()  # stops if not logged in
 
-    # ----------------- LOAD TRIPS -----------------
+    # ----------------- LOAD TRIPS FROM DISK -----------------
     all_trips = load_all_trips()
     user_trips = get_user_trips(current_user, all_trips)
     trip_names = sorted(user_trips.keys())
+
+    # ----------------- SESSION STATE FOR CURRENT TRIP -----------------
+    if "current_trip" not in st.session_state:
+        st.session_state["current_trip"] = new_empty_trip()
+    if "selected_trip_name" not in st.session_state:
+        st.session_state["selected_trip_name"] = "<New Trip>"
 
     # ----------------- SIDEBAR -----------------
     st.sidebar.title("Trips")
     st.sidebar.markdown(f"**Logged in as:** {current_user}")
 
-    # DEBUG: show which secret keys exist (NOT their values)
+    # Show which secrets keys exist (debug, but useful)
     try:
         st.sidebar.caption(f"Secrets keys: {list(st.secrets.keys())}")
     except Exception:
         st.sidebar.caption("Secrets not available.")
 
-    selected_name = st.sidebar.selectbox(
-        "Load a saved trip",
-        options=["<New Trip>"] + trip_names,
-        index=0,
-    )
-
-    # Determine currently loaded trip state
-    if selected_name == "<New Trip>":
-        trip = new_empty_trip()
+    # Also list saved trips in sidebar for quick reference
+    if trip_names:
+        st.sidebar.markdown("**Your saved trips:**")
+        for name in trip_names:
+            st.sidebar.markdown(f"- {name}")
     else:
-        trip = user_trips.get(selected_name, new_empty_trip())
-        # Ensure trip_name in data matches key
-        trip["trip_name"] = selected_name
+        st.sidebar.markdown("_No saved trips yet._")
 
-    # ChatGPT status in sidebar
+    # ChatGPT status
     _, client_err = get_openai_client()
     if client_err:
         st.sidebar.warning("Trip planner AI is not configured.\n\n" + client_err)
     else:
         st.sidebar.success("Trip planner AI is ready.")
 
-    # Save & delete buttons in sidebar
-    with st.sidebar:
-        st.markdown("---")
-        save_clicked = st.button("Save Trip")
-        delete_clicked = st.button("Delete Trip")
-
     # ----------------- MAIN UI -----------------
     st.title("Road Trip Planner")
+
+    # ---- Section 0: Choose or manage which trip you're editing ----
+    st.subheader("0. Choose or manage a trip")
+
+    options = ["<New Trip>"] + trip_names
+    try:
+        default_index = options.index(st.session_state["selected_trip_name"])
+    except ValueError:
+        default_index = 0
+
+    selected_name = st.selectbox(
+        "Choose a saved trip (or start a new one)",
+        options=options,
+        index=default_index,
+        help="Pick a previously saved trip, or '<New Trip>' to start fresh.",
+    )
+
+    # If user changed selection, load that trip into session
+    if selected_name != st.session_state["selected_trip_name"]:
+        st.session_state["selected_trip_name"] = selected_name
+        if selected_name == "<New Trip>":
+            st.session_state["current_trip"] = new_empty_trip()
+        else:
+            t = user_trips.get(selected_name, new_empty_trip())
+            t["trip_name"] = selected_name
+            st.session_state["current_trip"] = t
+
+    trip = st.session_state["current_trip"]
+
+    col_manage1, col_manage2 = st.columns(2)
+    with col_manage1:
+        save_clicked = st.button("💾 Save this trip")
+    with col_manage2:
+        delete_clicked = st.button("🗑️ Delete this trip")
+
+    if save_clicked:
+        if not trip["trip_name"].strip():
+            st.warning("Please enter a trip name in Section 1 before saving.")
+        else:
+            # Reload latest trips, just in case
+            all_trips = load_all_trips()
+            user_trips = get_user_trips(current_user, all_trips)
+
+            base_name = trip["trip_name"].strip()
+            unique_name = generate_unique_trip_name(base_name, list(user_trips.keys()))
+            trip["trip_name"] = unique_name
+
+            user_trips[unique_name] = trip
+            all_trips = set_user_trips(current_user, user_trips, all_trips)
+            save_all_trips(all_trips)
+
+            st.session_state["selected_trip_name"] = unique_name
+            st.session_state["current_trip"] = trip
+
+            st.success(f"Trip saved as: **{unique_name}**")
+            st.rerun()
+
+    if delete_clicked:
+        if selected_name == "<New Trip>":
+            st.warning("There is no saved trip to delete. Select a saved trip first.")
+        else:
+            # Reload latest trips, just in case
+            all_trips = load_all_trips()
+            user_trips = get_user_trips(current_user, all_trips)
+
+            if selected_name in user_trips:
+                del user_trips[selected_name]
+                all_trips = set_user_trips(current_user, user_trips, all_trips)
+                save_all_trips(all_trips)
+
+                st.session_state["selected_trip_name"] = "<New Trip>"
+                st.session_state["current_trip"] = new_empty_trip()
+
+                st.success(f"Trip '{selected_name}' deleted.")
+                st.rerun()
+            else:
+                st.error("Selected trip not found.")
+
+    st.markdown(
+        f"_Currently editing:_ **{trip.get('trip_name') or '(unsaved trip)'}**"
+    )
 
     # ---- Section 1: Basic Trip Info ----
     st.subheader("1. Basic Trip Info")
@@ -396,7 +468,7 @@ def main():
         "Trip name",
         value=trip.get("trip_name", ""),
         placeholder="e.g. Bowie to Miami – Scenic 12 days",
-        help="Give this trip a name so you can find it later.",
+        help="Give this trip a name so you can save and find it later.",
     )
 
     col1, col2 = st.columns(2)
@@ -433,10 +505,10 @@ def main():
             value=int(trip.get("total_days_available", 10)),
         )
     with col5:
-        trip["max_daily_drive_hours"] = st.slider(
+        trip["max_daily_drive_hours"] = st.number_input(
             "Max hours you're comfortable driving in a single day",
             min_value=1.0,
-            max_value=5.0,
+            max_value=12.0,
             step=0.5,
             value=float(trip.get("max_daily_drive_hours", 5.0)),
         )
@@ -531,27 +603,7 @@ def main():
         help="Optional: accessibility needs, mobility limits, etc.",
     )
 
-    st.markdown("**Route preferences**")
-    base_rc = trip.get("base_route_constraints", {}) or {}
-    colc1, colc2, colc3 = st.columns(3)
-    with colc1:
-        base_rc["avoid_tolls"] = st.checkbox(
-            "Avoid toll roads", value=bool(base_rc.get("avoid_tolls", False))
-        )
-    with colc2:
-        base_rc["avoid_ferries"] = st.checkbox(
-            "Avoid ferries", value=bool(base_rc.get("avoid_ferries", False))
-        )
-    with colc3:
-        base_rc["avoid_major_cities"] = st.checkbox(
-            "Avoid major city centers",
-            value=bool(base_rc.get("avoid_major_cities", False)),
-        )
-    trip["base_route_constraints"] = base_rc
-
-    st.markdown(
-        "**What kinds of things should the AI look for along the way?**"
-    )
+    st.markdown("**What kinds of things should the AI look for along the way?**")
     categories = [
         "michelin_star_dining",
         "other_high_end_dining",
@@ -593,7 +645,7 @@ def main():
     inverse_labels = {v: k for k, v in labels.items()}
     trip["auto_discovery_categories"] = [inverse_labels[d] for d in selected_display]
 
-    trip["default_max_detour_hours"] = st.slider(
+    trip["default_max_detour_hours"] = st.number_input(
         "How far off the direct route (in extra hours of driving) are you willing to go for interesting stops?",
         min_value=0.0,
         max_value=6.0,
@@ -609,9 +661,9 @@ def main():
             "balanced",
         ],
         format_func=lambda x: {
-            "minimize_driving_time": "Mainly minimize driving time",
-            "maximize_scenic_or_interesting_stops": "Maximize scenic or interesting stops",
-            "balanced": "Balance both",
+                "minimize_driving_time": "Mainly minimize driving time",
+                "maximize_scenic_or_interesting_stops": "Maximize scenic or interesting stops",
+                "balanced": "Balance both",
         }[x],
         index=[
             "minimize_driving_time",
@@ -639,17 +691,29 @@ def main():
     st.subheader("3. Points of Interest (optional)")
 
     st.markdown(
-        "Use these for specific ideas like **'Visit Asheville, NC'**, "
-        "**'Stay at a 5-star resort near Miami'**, or "
-        "**'Michelin restaurant within 1 hour of the route'**."
+        "Use these for specific ideas like **'Shopping'**, **'Fishing day'**, "
+        "**'Visit Asheville, NC'**, or **'Michelin restaurant along the route'**.\n\n"
+        "If you mark a stop as **Must do**, the AI must schedule it in the itinerary."
     )
 
     poi_list = trip.get("points_of_interest", [])
 
+    # Show a simple summary list of stops added
+    if poi_list:
+        st.markdown("**Stops added:**")
+        for i, poi in enumerate(poi_list, start=1):
+            label = poi.get("label") or f"Stop {i}"
+            prio = poi.get("priority", "nice_to_have")
+            prio_text = "Must do" if prio == "must_do" else "Nice to have"
+            st.markdown(f"- **Stop {i}: {label}** — {prio_text}")
+
+        st.markdown("---")
+
+    # Edit existing stops
     if poi_list:
         for i, poi in enumerate(poi_list):
             with st.expander(
-                f"Stop {i+1}: {poi.get('label') or 'Edit this stop'}",
+                f"Edit Stop {i+1}: {poi.get('label') or 'Edit this stop'}",
                 expanded=False,
             ):
                 poi["label"] = st.text_input(
@@ -685,7 +749,7 @@ def main():
                     f"Category for this stop (optional, Stop {i+1})",
                     value=poi.get("category", "") or "",
                     key=f"poi_cat_{i}",
-                    help="Example: 'michelin_star_restaurant', 'waterfall', 'historic_black_tour'.",
+                    help="Example: 'high_end_shopping', 'waterfall', 'historic_black_tour'.",
                 )
 
                 poi["details"] = st.text_area(
@@ -733,8 +797,10 @@ def main():
                 ):
                     poi_list.pop(i)
                     trip["points_of_interest"] = poi_list
+                    st.session_state["current_trip"] = trip
                     st.rerun()
 
+    # Add new stop
     st.markdown("---")
     st.markdown("**Add a new stop or idea**")
 
@@ -802,61 +868,14 @@ def main():
                 }
             )
             trip["points_of_interest"] = poi_list
+            st.session_state["current_trip"] = trip
             st.success("Stop added.")
+            st.rerun()
         else:
             st.error("Please give the stop a short title.")
 
-    # POI selection for refined plan (optional)
-    if poi_list:
-        st.markdown(
-            "**If you only want certain stops used in the final plan, pick them here (optional):**"
-        )
-        poi_numbers = list(range(1, len(poi_list) + 1))
-        selected_nums = st.multiselect(
-            "Stops to include in the final plan (by number):",
-            options=poi_numbers,
-            default=trip.get("poi_selection_for_refined_plan", []),
-        )
-        trip["poi_selection_for_refined_plan"] = selected_nums
-    else:
-        trip["poi_selection_for_refined_plan"] = []
-
-    # ----------------- HANDLE SAVE / DELETE -----------------
-    if save_clicked:
-        if not trip["trip_name"].strip():
-            st.sidebar.error("Please enter a trip name before saving.")
-        else:
-            # Refresh all_trips/user_trips in case of concurrent changes
-            all_trips = load_all_trips()
-            user_trips = get_user_trips(current_user, all_trips)
-
-            base_name = trip["trip_name"].strip()
-            unique_name = generate_unique_trip_name(
-                base_name, list(user_trips.keys())
-            )
-            trip["trip_name"] = unique_name
-
-            # Save under unique_name
-            user_trips[unique_name] = trip
-            all_trips = set_user_trips(current_user, user_trips, all_trips)
-            save_all_trips(all_trips)
-
-            st.sidebar.success(f"Trip saved as: {unique_name}")
-            st.rerun()
-
-    if delete_clicked and selected_name != "<New Trip>":
-        # Refresh load
-        all_trips = load_all_trips()
-        user_trips = get_user_trips(current_user, all_trips)
-
-        if selected_name in user_trips:
-            del user_trips[selected_name]
-            all_trips = set_user_trips(current_user, user_trips, all_trips)
-            save_all_trips(all_trips)
-            st.sidebar.success(f"Trip '{selected_name}' deleted.")
-            st.rerun()
-        else:
-            st.sidebar.error("Selected trip not found.")
+    # Make sure trip in session is updated with all changes so far
+    st.session_state["current_trip"] = trip
 
     # ----------------- Section 4: AI Trip Plan -----------------
     st.subheader("4. AI Trip Plan")
