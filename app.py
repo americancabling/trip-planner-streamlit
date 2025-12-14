@@ -104,11 +104,13 @@ def get_users_from_secrets():
     """
     Load USERS mapping from Streamlit secrets.
 
-    Expected format in secrets:
+    Expected format in secrets (cloud or local):
 
     [USERS]
     tim = "some_password"
     buddy = "another_password"
+
+    Usernames are stored as keys; we will treat them case-insensitively.
     """
     try:
         users = st.secrets["USERS"]
@@ -125,11 +127,23 @@ def authenticate():
     """
     Simple username/password login.
     Stores the logged-in username in st.session_state['current_user'].
+
+    Usernames are case-insensitive and trimmed (e.g., ' Tim ' or 'TIM' -> 'tim').
+    Passwords remain case-sensitive.
     """
-    users, err = get_users_from_secrets()
+    users_raw, err = get_users_from_secrets()
     if err:
         st.error(err)
         st.stop()
+
+    # Normalize usernames to lowercase for matching
+    normalized_users = {}
+    try:
+        for k in users_raw.keys():
+            normalized_users[str(k).lower()] = str(users_raw[k])
+    except Exception:
+        # Fallback in case users_raw isn't dict-like for some reason
+        normalized_users = {str(k).lower(): str(v) for k, v in dict(users_raw).items()}
 
     if "current_user" in st.session_state and st.session_state["current_user"]:
         return st.session_state["current_user"]
@@ -142,9 +156,13 @@ def authenticate():
         submitted = st.form_submit_button("Log in")
 
     if submitted:
-        if username in users and password == users[username]:
-            st.session_state["current_user"] = username
-            st.success(f"Welcome, {username}!")
+        uname = username.strip().lower()
+        pwd = password.strip()
+
+        if uname in normalized_users and pwd == normalized_users[uname]:
+            # Store the normalized username; you could also store the original if you prefer
+            st.session_state["current_user"] = uname
+            st.success(f"Welcome, {uname}!")
             st.rerun()
         else:
             st.error("Invalid username or password.")
@@ -231,7 +249,6 @@ def get_openai_client():
     if not api_key:
         try:
             users_section = st.secrets["USERS"]
-            # users_section behaves like a dict-like object
             try:
                 api_key = users_section["OPENAI_API_KEY"]
             except Exception:
@@ -372,11 +389,10 @@ def main():
     st.sidebar.title("Trips")
     st.sidebar.markdown(f"**Logged in as:** {current_user}")
 
-    # Show which secrets keys exist (debug)
+    # Show which secrets keys exist (debug) and USERS contents
     try:
         keys = list(st.secrets.keys())
         st.sidebar.caption(f"Secrets keys: {keys}")
-        # Also show keys inside USERS, if present
         if "USERS" in keys:
             users_section = st.secrets["USERS"]
             try:
